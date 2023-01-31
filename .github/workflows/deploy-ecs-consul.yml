@@ -44,14 +44,20 @@ jobs:
       IMAGE_NAME: ${{ needs.test-and-build.outputs.IMAGE_NAME }}
       PROJECT_NAME: ${{ needs.test-and-build.outputs.PROJECT_NAME }}
       DEPLOYMENT_TYPE: ECS
-      CONTAINER_PORT: 8500
+      PORT_MAPPINGS: 8500:8500, 8600:8600, 8300:8300, 8301:8301, 8302:8302
+      EXPORTED_ENVIRONMENTS: CONSUL_PEERS_URL
+      IS_BOOTSTRAP: true
+      CDK_DEFAULT_ACCOUNT: ${{ secrets.AWS_ACCOUNT_ID }}
+      CDK_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
     steps:
       - run: |
           echo "STACK_ID=$PROJECT_NAME-ecsDeploymentStack" >> $GITHUB_ENV
           echo "CONTAINER_NAME=$PROJECT_NAME" >> $GITHUB_ENV
           echo "TASK_FAMILY=$PROJECT_NAME-td" >> $GITHUB_ENV
           echo "SERVICE_NAME=$PROJECT_NAME-svc" >> $GITHUB_ENV
-          echo "HEALTH_CHECK_COMMAND=curl http://localhost:$CONTAINER_PORT/" >> $GITHUB_ENV
+          echo "HEALTH_CHECK_COMMAND=curl http://localhost:8500/" >> $GITHUB_ENV
+      - run: |
+          echo "CONSUL_PEERS_URL=$SERVICE_NAME.pharmacy-cluster" >> $GITHUB_ENV
       - uses: actions/checkout@v3
         with:
           repository: hoquangnam45/pharmacy-infra
