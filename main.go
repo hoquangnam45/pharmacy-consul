@@ -4,55 +4,50 @@ import (
 	"encoding/json"
 	"io"
 	"log"
-	"net"
 	"os"
-	"strconv"
 	"time"
 
-	"github.com/hoquangnam45/pharmacy-common-go/helper/errorHandler"
+	"github.com/hoquangnam45/pharmacy-common-go/helper/dns"
+	"github.com/hoquangnam45/pharmacy-common-go/helper/ecs"
+	handler "github.com/hoquangnam45/pharmacy-common-go/helper/errorHandler"
 )
 
 const CONSUL_PEERS_URL_ENV = "CONSUL_PEERS_URL"
-const ECS_CONTAINER_METADATA_FILE_ENV = "ECS_CONTAINER_METADATA_FILE"
 const CONSUL_CONFIG_PATH_ENV = "CONSUL_CONFIG_PATH"
-const CONSUL_HTTP_API_PORT = 8500
-
-type UrlPart struct {
-	Prefix string
-	Domain string
-	Port   int
-	Path   string
-}
+const ECS_CONTAINER_METADATA_FILE_ENV = "ECS_CONTAINER_METADATA_FILE"
 
 func main() {
-	consulConfigPath := getEnvOrDefault(CONSUL_CONFIG_PATH_ENV, func(val string) (string, error) {
-		return val, nil
-	}, "/consul/config/consul_config.json")
-	peers, err := resolveSrvDns(os.Getenv(CONSUL_PEERS_URL_ENV))
+	containerInfo, err := handler.Lift(ecs.GetContainerInfo)(os.Getenv(ECS_CONTAINER_METADATA_FILE_ENV)).
+		RetryUntilSuccess(time.Duration(30)*time.Second, time.Duration(5)*time.Second).
+		EvalNoCleanup()
 	if err != nil {
 		log.Fatal(err)
 		return
 	}
-	err = writeToConsulConfig(consulConfigPath, peers)
-	if err != nil {
+	handler.FlatMap2(
+		handler.Just(os.Getenv(CONSUL_PEERS_URL_ENV)),
+		func(peerUrl string) *handler.MaybeError[map[string]bool] {
+			return handler.Lift(dns.ResolveSrvDns)(peerUrl).
+				RetryUntilSuccess(time.Duration(50)*time.Second, time.Duration(10)*time.Second)
+		},
+		handler.Lift(func(peers map[string]bool) (any, error) {
+			consulConfigPath := getEnvOrDefault(CONSUL_CONFIG_PATH_ENV, "/consul/config/consul_config.json")
+			return nil, writeToConsulConfig(consulConfigPath, containerInfo, peers)
+		}),
+	).GetWithHandler(func(err error) {
 		log.Fatal(err)
-		return
-	}
+	})
 }
 
-func getEnvOrDefault[T any](key string, convert func(string) (T, error), defaultValue T) T {
+func getEnvOrDefault(key, defaultValue string) string {
 	env, ok := os.LookupEnv(key)
 	if !ok {
 		return defaultValue
 	}
-	v, err := convert(env)
-	if err != nil {
-		return defaultValue
-	}
-	return v
+	return env
 }
 
-func writeToConsulConfig(configPath string, peers map[string]bool) error {
+func writeToConsulConfig(configPath string, containerInfo *ecs.ContainerInfo, peers map[string]bool) error {
 	consulConfig := map[string]any{}
 	startJoins := []string{}
 
@@ -73,10 +68,19 @@ func writeToConsulConfig(configPath string, peers map[string]bool) error {
 	consulConfig["auto_reload_config"] = true
 	consulConfig["data_dir"] = "/consul/data/"
 	consulConfig["bind_addr"] = "{{ GetInterfaceIP \"eth0\" }}"
-	consulConfig["advertise_addr"] = "{{ GetInterfaceIP \"eth0\" }}"
+	consulConfig["advertise_addr"] = containerInfo.HostIp
+	consulConfig["ports"] = map[string]int{
+		"serf_lan": containerInfo.PortMappings[8301],
+		"serf_wan": containerInfo.PortMappings[8302],
+		"dns":      containerInfo.PortMappings[8600],
+		"http":     containerInfo.PortMappings[8500],
+		"server":   containerInfo.PortMappings[8300],
+	}
 	consulConfig["client_addr"] = "0.0.0.0"
 	consulConfig["disable_update_check"] = true
-
+	for k, v := range containerInfo.PortMappings {
+		log.Println(k, ":", v)
+	}
 	bytes, err := json.Marshal(consulConfig)
 	if err != nil {
 		return err
@@ -98,30 +102,4 @@ func writeToConsulConfig(configPath string, peers map[string]bool) error {
 		return err
 	}
 	return nil
-}
-
-func resolveSrvDns(link string) (map[string]bool, error) {
-	addrs, _, err := errorHandler.FlatMap(
-		errorHandler.FlatMap(
-			errorHandler.Just(link),
-			func(host string) *errorHandler.MaybeError[[]*net.SRV] {
-				log.Printf("Start lookingup host %s", host)
-				_, addrs, err := net.LookupSRV("", "", host)
-				if err != nil {
-					return errorHandler.Error[[]*net.SRV](err)
-				}
-				return errorHandler.Just(addrs)
-			}).RetryUntilSuccess(time.Second*time.Duration(50), time.Second*time.Duration(10)),
-		func(addrs []*net.SRV) *errorHandler.MaybeError[map[string]bool] {
-			resolvedAddrs := map[string]bool{}
-			log.Printf("Found %d records: ", len(addrs))
-			for _, v := range addrs {
-				resolvedAddr := v.Target + ":" + strconv.Itoa(int(v.Port))
-				log.Print(resolvedAddr)
-				resolvedAddrs[resolvedAddr] = true
-			}
-			return errorHandler.Just(resolvedAddrs)
-		},
-	).Eval()
-	return addrs, err
 }
