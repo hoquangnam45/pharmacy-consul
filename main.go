@@ -57,7 +57,7 @@ func writeToConsulConfig(configPath string, peers map[string]bool) error {
 	startJoins := []string{}
 
 	for k := range peers {
-		startJoins = append(startJoins, k+":8301")
+		startJoins = append(startJoins, k)
 	}
 	consulConfig["retry_join"] = startJoins
 	consulConfig["client_addr"] = "0.0.0.0"
