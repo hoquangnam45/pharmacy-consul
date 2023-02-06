@@ -44,14 +44,16 @@ jobs:
       IMAGE_NAME: ${{ needs.test-and-build.outputs.IMAGE_NAME }}
       PROJECT_NAME: ${{ needs.test-and-build.outputs.PROJECT_NAME }}
       DEPLOYMENT_TYPE: ECS
-      CONTAINER_PORT_MAPPINGS: 0:8500, 0:8301, 0:8302, 0:8600:UDP, 0:8300
-      EXPORTED_ENVIRONMENTS: CONSUL_PEERS_URL
+      CONTAINER_PORT_MAPPINGS: 8500:8500, 8301:8301, 8301:8301:UDP, 8302:8302, 8302:8302:UDP, 8600:8600, 8600:8600:UDP, 8300:8300
       CDK_DEFAULT_ACCOUNT: ${{ secrets.AWS_ACCOUNT_ID }}
       CDK_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
-      USE_LOAD_BALANCER: true
-      LB_PORT_MAPPINGS: 1:8500:false:/ui/
-      CLOUD_MAP_PORT: 8302
-      CONTAINER_HEALTH_CHECK_CMD: curl http://localhost:8500/
+      CONTAINER_HEALTH_CHECK_CMD: curl http://localhost:8500/ui/
+      NETWORK_MODE: HOST
+      EXPORTED_ENVIRONMENTS: CONSUL_SERVER_MODE, CONSUL_SERVER_BOOTSTRAP_EXPECT, CONSUL_BIND_INTERFACE, ECS_CONSUL_SERVER_URL
+      CONSUL_SERVER_MODE: true
+      CONSUL_SERVER_BOOTSTRAP_EXPECT: 1
+      CONSUL_BIND_INTERFACE: eth0
+      DAEMON: true
     steps:
       - run: |
           echo "STACK_ID=$PROJECT_NAME-ecsDeploymentStack" >> $GITHUB_ENV
@@ -59,7 +61,7 @@ jobs:
           echo "TASK_FAMILY=$PROJECT_NAME-td" >> $GITHUB_ENV
           echo "SERVICE_NAME=$PROJECT_NAME-svc" >> $GITHUB_ENV
       - run: |
-          echo "CONSUL_PEERS_URL=$SERVICE_NAME.pharmacy-cluster." >> $GITHUB_ENV
+          echo "ECS_CONSUL_SERVER_URL=$SERVICE_NAME.pharmacy-cluster" >> $GITHUB_ENV
       - uses: actions/checkout@v3
         with:
           repository: hoquangnam45/pharmacy-infra

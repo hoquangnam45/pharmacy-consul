@@ -1,60 +1,59 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
-	"log"
 	"os"
+	"strconv"
 	"time"
 
-	"github.com/hoquangnam45/pharmacy-common-go/helper/dns"
 	"github.com/hoquangnam45/pharmacy-common-go/helper/ecs"
-	handler "github.com/hoquangnam45/pharmacy-common-go/helper/errorHandler"
+	"github.com/hoquangnam45/pharmacy-common-go/util"
+	h "github.com/hoquangnam45/pharmacy-common-go/util/errorHandler"
 )
 
-const CONSUL_PEERS_URL_ENV = "CONSUL_PEERS_URL"
-const CONSUL_CONFIG_PATH_ENV = "CONSUL_CONFIG_PATH"
-const ECS_CONTAINER_METADATA_FILE_ENV = "ECS_CONTAINER_METADATA_FILE"
+const CONSUL_CONFIG_PATH = "/consul/config/consul_config.json"
+const ECS_CONSUL_SERVER_URL_ENV = "ECS_CONSUL_SERVER_URL"
+const CONSUL_BIND_INTERFACE_ENV = "CONSUL_BIND_INTERFACE"
 
 func main() {
-	containerInfo, err := handler.Lift(ecs.GetContainerInfo)(os.Getenv(ECS_CONTAINER_METADATA_FILE_ENV)).
-		RetryUntilSuccess(time.Duration(30)*time.Second, time.Duration(5)*time.Second).
-		EvalNoCleanup()
-	if err != nil {
-		log.Fatal(err)
-		return
+	advertiseIp := ""
+	bindInterface := ""
+	consulServers := map[string]bool{}
+	if bindInterface_, ok := os.LookupEnv("CONSUL_BIND_INTERFACE"); ok {
+		bindInterface = bindInterface_
+		advertiseIp = h.Lift(util.FindBindInterfaceAddress)(bindInterface_).PanicEval()
+	} else {
+		pair := h.FactoryM(util.FindFirstNonLoopBackAddr).PanicEval()
+		bindInterface = pair.Second
+		advertiseIp = pair.First
+		util.SugaredLogger.Infof("Bind to interface %s with address %s", bindInterface, advertiseIp)
 	}
-	handler.FlatMap2(
-		handler.Just(os.Getenv(CONSUL_PEERS_URL_ENV)),
-		func(peerUrl string) *handler.MaybeError[map[string]bool] {
-			return handler.Lift(dns.ResolveSrvDns)(peerUrl).
-				RetryUntilSuccess(time.Duration(50)*time.Second, time.Duration(10)*time.Second)
-		},
-		handler.Lift(func(peers map[string]bool) (any, error) {
-			consulConfigPath := getEnvOrDefault(CONSUL_CONFIG_PATH_ENV, "/consul/config/consul_config.json")
-			return nil, writeToConsulConfig(consulConfigPath, containerInfo, peers)
-		}),
-	).GetWithHandler(func(err error) {
-		log.Fatal(err)
-	})
+
+	if consulServerUrl, ok := os.LookupEnv(ECS_CONSUL_SERVER_URL_ENV); ok {
+		consulServers = h.FactoryM(func() (map[string]bool, error) {
+			return ecs.ResolveHostModeService(context.Background(), consulServerUrl)
+		}).
+			RetryUntilSuccess(time.Second*50, time.Second*10).
+			PanicEval()
+	}
+	consulServers[advertiseIp] = true
+
+	serverMode := util.GetEnvOrDefaultT("CONSUL_SERVER_MODE", strconv.ParseBool, true)
+	bootstrapExpect := int(util.GetEnvOrDefaultT("CONSUL_SERVER_BOOTSTRAP_EXPECT", func(s string) (uint64, error) {
+		return strconv.ParseUint(s, 10, 0)
+	}, 1))
+
+	h.FactoryM(func() (any, error) {
+		return nil, writeToConsulConfig(CONSUL_CONFIG_PATH, serverMode, bootstrapExpect, bindInterface, consulServers)
+	}).PanicEval()
 }
 
-func getEnvOrDefault(key, defaultValue string) string {
-	env, ok := os.LookupEnv(key)
-	if !ok {
-		return defaultValue
-	}
-	return env
-}
-
-func writeToConsulConfig(configPath string, containerInfo *ecs.ContainerInfo, peers map[string]bool) error {
+func writeToConsulConfig(configPath string, serverMode bool, bootstrapExpect int, bindInterface string, consulServers map[string]bool) error {
 	consulConfig := map[string]any{}
-	startJoins := []string{}
 
-	for k := range peers {
-		startJoins = append(startJoins, k)
-	}
-	consulConfig["retry_join"] = startJoins
 	consulConfig["client_addr"] = "0.0.0.0"
 	consulConfig["rejoin_after_leave"] = true
 	consulConfig["leave_on_terminate"] = true
@@ -62,25 +61,16 @@ func writeToConsulConfig(configPath string, containerInfo *ecs.ContainerInfo, pe
 	consulConfig["ui_config"] = map[string]any{
 		"enabled": true,
 	}
-	consulConfig["server"] = true
-	consulConfig["bootstrap_expect"] = 1
-	consulConfig["log_file"] = "/var/log/consul/"
+	consulConfig["bind_addr"] = fmt.Sprintf("{{ GetInterfaceIP \"%s\" }}", bindInterface)
+	consulConfig["server"] = serverMode
+	if serverMode {
+		consulConfig["bootstrap_expect"] = bootstrapExpect
+	}
+	consulConfig["retry_join"] = util.SetToList(consulServers)
 	consulConfig["auto_reload_config"] = true
 	consulConfig["data_dir"] = "/consul/data/"
-	consulConfig["bind_addr"] = "{{ GetInterfaceIP \"eth0\" }}"
-	consulConfig["advertise_addr"] = containerInfo.HostIp
-	consulConfig["ports"] = map[string]int{
-		"serf_lan": containerInfo.PortMappings[8301],
-		"serf_wan": containerInfo.PortMappings[8302],
-		"dns":      containerInfo.PortMappings[8600],
-		"http":     containerInfo.PortMappings[8500],
-		"server":   containerInfo.PortMappings[8300],
-	}
 	consulConfig["client_addr"] = "0.0.0.0"
 	consulConfig["disable_update_check"] = true
-	for k, v := range containerInfo.PortMappings {
-		log.Println(k, ":", v)
-	}
 	bytes, err := json.Marshal(consulConfig)
 	if err != nil {
 		return err
